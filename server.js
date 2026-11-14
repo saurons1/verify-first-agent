@@ -19,6 +19,7 @@
 
 const http = require('node:http');
 const { runChecks } = require('./checks/index');
+const { handleAgentPost, getSecret, PROTOCOL_VERSION } = require('./agent');
 
 const PORT = Number(process.env.PORT || 3000);
 const MAX_BODY_BYTES = 64 * 1024;
@@ -43,10 +44,41 @@ function readBody(req) {
   });
 }
 
+function sendSigned(res, status, obj) {
+  const secret = getSecret();
+  const body = JSON.stringify(obj);
+  const headers = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) };
+  if (secret) {
+    const crypto = require('node:crypto');
+    headers['x-agent-games-signature'] = crypto.createHmac('sha256', secret).update(body).digest('hex');
+  }
+  res.writeHead(status, headers);
+  res.end(body);
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && req.url === '/health') {
       return sendJson(res, 200, { ok: true, agent: 'verify-first', mode: 'read-only', never_signs: true });
+    }
+
+    // Proof Gatekeeper endpoint (Agent Games protocol).
+    // GET /agent = health probe. POST /agent = HMAC-signed preflight/tasks.
+    if (req.url === '/agent') {
+      if (req.method === 'GET') {
+        return sendJson(res, 200, { ok: true, agent: 'verify-first', protocolVersion: PROTOCOL_VERSION, mode: 'read-only' });
+      }
+      if (req.method === 'POST') {
+        let raw;
+        try {
+          raw = Buffer.from(await readBody(req), 'utf8');
+        } catch (e) {
+          return sendJson(res, 400, { error: `invalid body: ${e.message}` });
+        }
+        const out = handleAgentPost(raw, req.headers['x-agent-games-signature']);
+        if (out.sign) return sendSigned(res, out.status, out.body);
+        return sendJson(res, out.status, out.body);
+      }
     }
 
     if (req.method === 'POST' && req.url === '/verify') {

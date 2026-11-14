@@ -93,6 +93,45 @@ node demo.mjs
 
 Expected outcome (verified live, 2026-11-15): `freeMinted` 743 of 777, `totalSupply` 819 of 3,333, and `balanceOf(sukm)` is 1 — sukm already owns CrossEyed #1042, so the 1-per-wallet free mint is already used and the verdict is **BLOCK**. Note: this contract does **not** expose a `freeClaimed(address)` view — `eth_call` with the correct selector (`0x61c0b6a0`) reverts on all 4 public RPCs, as do 24 other candidate tracker names, so the demo proves "already claimed" via `balanceOf` instead of fabricating a `freeClaimed` result. The `freeClaimed` check itself stays in the module for contracts that do expose it; on this contract it correctly reports unknown → BLOCK.
 
+## Proof Gatekeeper endpoint (`POST /agent`)
+
+This agent is also registered for the **Proof Gatekeeper** track (Agent Games).
+`POST /agent` implements the [Agent Games builder protocol](https://agentgames.zkverify.io/build)
+(exact envelope shapes verified against the working reference implementation
+[andruu21/proof-gatekeeper-agent](https://github.com/andruu21/proof-gatekeeper-agent)):
+
+- Every request must carry `x-agent-games-signature`: HMAC-SHA256 over the
+  **raw** request body (hex or base64), verified **before** JSON parsing.
+  Mismatch, or no secret configured, → HTTP 401. The secret comes only
+  from the environment variable `AGENT_GAMES_HMAC_SECRET` (the
+  platform-generated value from the dashboard's **Rotate Secret**) — never
+  a placeholder, never hardcoded, never logged.
+- `type: "agent-games.preflight.v1"` (the platform's health check) →
+  signed `{ ok: true, protocolVersion: "v1" }`. `GET /agent` also answers
+  200 as a health probe.
+- `type: "agent-games.proof-gatekeeper.v1"` → deterministic APPROVE/REJECT
+  from the envelope fields (all six checks, boundaries included):
+  `VK_SUBSTITUTION`, `PROOF_REUSED`, `THRESHOLD_MISMATCH`,
+  `EXPIRED_CONDITION`, `RECIPIENT_MISMATCH`, `AMOUNT_OVERFLOW`, or
+  `VALID_CONDITION`. Responses are HMAC-signed. Same `task_id` redelivered
+  returns the cached response (idempotent); malformed or past-deadline
+  tasks fail closed with REJECT / `INVALID_TASK`.
+
+**Known gap — no Groth16 proof yet:** a full Gatekeeper answer also
+carries a Groth16 proof (`snarkjs`, official gatekeeper circuit) +
+`public_signals` + `proof_tx` submitted to zkVerify via Kurier. This
+module returns the decision + `reason_code` only (no proof fields). Per
+the event scoring a missing proof costs −2 while the decision itself is
+still scored — but this is NOT a proof-backed answer and is never claimed
+to be one. Proof generation is a separate build (circuit artifacts are
+public at `/api/circuit-info`).
+
+```bash
+AGENT_GAMES_HMAC_SECRET=<platform secret> node server.js
+curl http://localhost:3000/agent
+# {"ok":true,"agent":"verify-first","protocolVersion":"v1","mode":"read-only"}
+```
+
 ## zkVerify — honest status
 
 **zkVerify is OPTIONAL for this track and is NOT yet integrated into this repo.**
@@ -105,7 +144,8 @@ This repo ships the deterministic verifier logic such a proof would cover: the s
 ## Repo layout
 
 ```
-server.js          HTTP server: GET /health, POST /verify
+server.js          HTTP server: GET /health, POST /verify, POST /agent (Gatekeeper)
+agent.js           Proof Gatekeeper protocol: HMAC verify/sign, preflight, deterministic decision
 checks/index.js    the checks: supply, freeQuota, balance, freeClaimed, mintOpen, simulate stub
 lib/rpc.js         read-only eth_call / eth_blockNumber helpers + RPC fallback
 demo.mjs           live read-only demo against the CrossEyed NFT contract
